@@ -1,0 +1,12 @@
+// Self-destruct service worker — purges all caches and unregisters itself
+// Deployed to kill stale v5 cache-first SW that was serving old JS chunks
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((names) => Promise.all(names.map((n) => caches.delete(n))))
+      .then(() => self.registration.unregister())
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then((clients) => clients.forEach((c) => c.navigate(c.url)))
+  );
+});

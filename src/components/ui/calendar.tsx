@@ -1,0 +1,94 @@
+'use client';
+
+import * as React from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { DayPicker, DropdownProps } from "react-day-picker";
+import { format } from "date-fns";
+import { ptBR } from "date-fns/locale";
+
+import { cn } from "@/lib/utils";
+import { buttonVariants } from "@/components/ui/button";
+
+export type CalendarProps = React.ComponentProps<typeof DayPicker>;
+
+function Calendar({ className, classNames, showOutsideDays = true, ...props }: CalendarProps) {
+  return (
+    <DayPicker
+      locale={ptBR}
+      showOutsideDays={showOutsideDays}
+      className={cn("p-3", className)}
+      classNames={{
+        months: "flex flex-col sm:flex-row space-y-4 sm:space-x-4 sm:space-y-0",
+        month: "space-y-4",
+        caption: "flex justify-center pt-1 relative items-center w-full px-10",
+        caption_label: "hidden", // We use custom dropdowns, so hide the default text
+        nav: "space-x-1 flex items-center",
+        nav_button: cn(
+          buttonVariants({ variant: "outline" }),
+          "h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100",
+        ),
+        nav_button_previous: "absolute left-1",
+        nav_button_next: "absolute right-1",
+        table: "w-full border-collapse space-y-1",
+        head_row: "flex",
+        head_cell: "text-muted-foreground rounded-md w-9 font-normal text-[0.8rem]",
+        row: "flex w-full mt-2",
+        cell: "h-9 w-9 text-center text-sm p-0 relative [&:has([aria-selected].day-range-end)]:rounded-r-md [&:has([aria-selected].day-outside)]:bg-accent/50 [&:has(.day-range-middle)]:bg-accent/40 first:[&:has([aria-selected])]:rounded-l-md last:[&:has([aria-selected])]:rounded-r-md focus-within:relative focus-within:z-20",
+        day: cn(
+          buttonVariants({ variant: "ghost" }),
+          "h-full w-full p-0 font-normal aria-selected:opacity-100 focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0 disabled:opacity-50"
+        ),
+        day_range_end: "day-range-end",
+        day_selected:
+          "bg-emerald-700 text-white hover:bg-emerald-600 hover:text-white focus:bg-emerald-700 focus:text-white rounded-md",
+        day_today: "bg-emerald-900/30 text-emerald-100 font-bold",
+        day_outside:
+          "day-outside text-muted-foreground opacity-50 aria-selected:bg-accent/50 aria-selected:text-muted-foreground aria-selected:opacity-30",
+        day_disabled: "text-muted-foreground opacity-50",
+        day_range_middle: "aria-selected:bg-accent aria-selected:text-accent-foreground",
+        day_hidden: "invisible",
+        caption_dropdowns: "flex gap-1 justify-center items-center w-full",
+        dropdown: "hidden", // Hide actual react-day-picker selects
+        dropdown_month: "flex",
+        dropdown_year: "flex",
+        ...classNames,
+      }}
+      components={{
+        IconLeft: ({ ..._props }) => <ChevronLeft className="h-4 w-4" />,
+        IconRight: ({ ..._props }) => <ChevronRight className="h-4 w-4" />,
+        Dropdown: (dropdownProps: DropdownProps) => {
+          const { value, onChange, children, name } = dropdownProps;
+          const options = React.Children.toArray(children) as React.ReactElement<React.HTMLProps<HTMLOptionElement>>[];
+          const isMonth = name === "months";
+
+          return (
+            <select
+              value={value?.toString()}
+              onChange={(e) => onChange?.(e)}
+              className={cn(
+                "h-8 px-2 bg-transparent hover:bg-muted/50 text-sm font-medium rounded-md border-0 outline-none cursor-pointer appearance-none text-center",
+                isMonth ? "min-w-[90px]" : "min-w-[65px]"
+              )}
+              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 4px center', paddingRight: '20px' }}
+            >
+              {options.map((option) => (
+                <option
+                  key={option.props?.value as string}
+                  value={option.props?.value?.toString() ?? ""}
+                >
+                  {isMonth
+                    ? format(new Date(2024, Number(option.props?.value), 1), 'LLLL', { locale: ptBR })
+                    : option.props?.children}
+                </option>
+              ))}
+            </select>
+          );
+        },
+      }}
+      {...props}
+    />
+  );
+}
+Calendar.displayName = "Calendar";
+
+export { Calendar };

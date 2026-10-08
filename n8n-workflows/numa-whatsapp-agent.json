@@ -1,0 +1,650 @@
+{
+  "name": "Numa - Agente WhatsApp Financeiro Empresarial",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agentenuma",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1200,
+        400
+      ],
+      "id": "webhook-entry",
+      "name": "[1] Webhook Evolution"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalização do webhook da Evolution API\nconst body = $input.first().json.body;\n\n// --- Cenário: recebimento de mensagem via Evolution ---\nlet event_type = body?.event || '';\nlet data = body?.data || body || {};\nlet instance = body?.instance || data?.instance || '';\nlet sender = body?.sender || '';\n\n// Dados do contato\nlet remoteJid = data?.key?.remoteJid || data?.remoteJid || '';\nlet pushName = data?.pushName || data?.key?.pushName || '';\nlet profilePicUrl = '';\n\n// Dados da mensagem\nlet messageType = 'unknown';\nlet messageContent = '';\nlet messageId = data?.key?.id || '';\nlet fromMe = data?.key?.fromMe || false;\nlet timestamp = data?.messageTimestamp || Math.floor(Date.now() / 1000);\n\n// Detectar tipo\nif (data?.message?.conversation || data?.message?.extendedTextMessage?.text) {\n  messageType = 'text';\n  messageContent = data?.message?.conversation || data?.message?.extendedTextMessage?.text || '';\n} else if (data?.message?.audioMessage) {\n  messageType = 'audio';\n  messageContent = '[Áudio recebido]';\n} else if (data?.message?.imageMessage) {\n  messageType = 'image';\n  messageContent = data?.message?.imageMessage?.caption || '[Imagem recebida]';\n} else if (data?.message?.documentMessage) {\n  messageType = 'document';\n  let mimetype = data?.message?.documentMessage?.mimetype || '';\n  if (mimetype.includes('pdf')) {\n    messageType = 'pdf';\n  }\n  messageContent = data?.message?.documentMessage?.fileName || '[Documento recebido]';\n} else if (data?.message?.videoMessage) {\n  messageType = 'video';\n  messageContent = '[Vídeo recebido]';\n} else if (data?.message?.stickerMessage) {\n  messageType = 'sticker';\n  messageContent = '[Sticker]';\n} else if (data?.message?.reactionMessage) {\n  messageType = 'reaction';\n  messageContent = data?.message?.reactionMessage?.text || '';\n} else if (data?.message?.locationMessage) {\n  messageType = 'location';\n  messageContent = '[Localização]';\n} else if (data?.message?.contactMessage || data?.message?.contactsArrayMessage) {\n  messageType = 'contact';\n  messageContent = '[Contato compartilhado]';\n}\n\n// Detectar origem (Meta Ads vs Orgânico)\nlet ctwaClid = data?.contextInfo?.externalAdReply?.sourceId || '';\nlet isFromAd = !!ctwaClid;\nlet origem = isFromAd ? 'whatsapp_ads' : 'whatsapp_organico';\n\n// Detectar LID (Lead from Instagram/Facebook)\nlet lidId = '';\nif (remoteJid && remoteJid.includes('@lid')) {\n  lidId = remoteJid;\n  origem = 'meta_ads_lid';\n}\n\n// UTM data from ctwa\nlet utmSource = '';\nlet utmMedium = '';\nlet utmCampaign = '';\nlet utmContent = '';\n\n// Extrair telefone formatado\nlet telefone = remoteJid ? remoteJid.split('@')[0] : '';\nlet telefoneFormatado = telefone;\nif (telefone.length >= 12) {\n  telefoneFormatado = `+${telefone.substring(0, 2)} (${telefone.substring(2, 4)}) ${telefone.substring(4, 9)}-${telefone.substring(9)}`;\n}\n\nreturn {\n  json: {\n    // Identificação\n    remote_jid: remoteJid,\n    lid_id: lidId,\n    instance: instance,\n    sender: sender,\n    push_name: pushName,\n    profile_picture_url: profilePicUrl,\n    \n    // Mensagem\n    message_type: messageType,\n    message_content: messageContent,\n    message_id: messageId,\n    from_me: fromMe,\n    timestamp: timestamp,\n    \n    // Contato\n    telefone: telefone,\n    telefone_formatado: telefoneFormatado,\n    \n    // Rastreamento\n    origem: origem,\n    ctwa_clid: ctwaClid,\n    is_from_ad: isFromAd,\n    utm_source: utmSource,\n    utm_medium: utmMedium,\n    utm_campaign: utmCampaign,\n    utm_content: utmContent,\n    \n    // Meta\n    event_type: event_type,\n    raw_data: data\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        400
+      ],
+      "id": "normalize-webhook",
+      "name": "[2] Normalizar Webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "filter-from-me",
+              "leftValue": "={{ $json.from_me }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "filter-event",
+              "leftValue": "={{ $json.event_type }}",
+              "rightValue": "messages.upsert",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        -720,
+        400
+      ],
+      "id": "filter-valid-msg",
+      "name": "[3] Filtrar Mensagens Válidas"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verificar se o agente está ativo para este lead via Redis\n// Se agente_ativo = false, o lead está sendo atendido por um humano\nconst remoteJid = $input.first().json.remote_jid;\nconst instance = $input.first().json.instance;\nconst botStatusKey = `numa:bot_status:${instance}:${remoteJid}`;\n\n// Consultar Redis (Upstash)\nconst redisUrl = $env.UPSTASH_REDIS_URL || '';\nconst redisToken = $env.UPSTASH_REDIS_TOKEN || '';\n\nlet agenteAtivo = true;\n\nif (redisUrl && redisToken) {\n  try {\n    const response = await fetch(`${redisUrl}/get/${botStatusKey}`, {\n      headers: { 'Authorization': `Bearer ${redisToken}` }\n    });\n    const data = await response.json();\n    if (data.result === 'disabled') {\n      agenteAtivo = false;\n    }\n  } catch (err) {\n    console.log('Redis check failed, assuming active:', err.message);\n  }\n}\n\nreturn {\n  json: {\n    ...$input.first().json,\n    agente_ativo: agenteAtivo\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        400
+      ],
+      "id": "check-bot-status",
+      "name": "[4] Verificar Status Agente"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.agente_ativo }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        400
+      ],
+      "id": "if-active",
+      "name": "[5] Agente Ativo?"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputIndex": 0,
+              "value": "text"
+            },
+            {
+              "outputIndex": 1,
+              "value": "audio"
+            },
+            {
+              "outputIndex": 2,
+              "value": "image"
+            },
+            {
+              "outputIndex": 3,
+              "value": "pdf"
+            },
+            {
+              "outputIndex": 4,
+              "value": "document"
+            }
+          ]
+        },
+        "dataType": "string",
+        "value": "={{ $json.message_type }}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        0,
+        400
+      ],
+      "id": "switch-msg-type",
+      "name": "[6] Tipo Mensagem"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mensagem de texto — passa direto para o buffer\nreturn {\n  json: {\n    ...$input.first().json,\n    processed_content: $input.first().json.message_content,\n    content_type: 'text'\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        200
+      ],
+      "id": "process-text",
+      "name": "[6a] Processar Texto"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transcrever áudio via Whisper (OpenAI)\nconst remoteJid = $input.first().json.remote_jid;\nconst instance = $input.first().json.instance;\nconst messageId = $input.first().json.message_id;\n\n// Baixar áudio da Evolution API\nconst evolutionUrl = $env.EVOLUTION_API_URL || '';\nconst evolutionKey = $env.EVOLUTION_API_KEY || '';\n\ntry {\n  // 1. Fazer download do media via Evolution\n  const mediaResp = await fetch(`${evolutionUrl}/chat/getBase64FromMediaMessage/${instance}`, {\n    method: 'POST',\n    headers: {\n      'apikey': evolutionKey,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      message: { key: { id: messageId, remoteJid: remoteJid } },\n      convertToMp4: false\n    })\n  });\n  const mediaData = await mediaResp.json();\n  const base64Audio = mediaData.base64 || '';\n  const mimetype = mediaData.mimetype || 'audio/ogg';\n\n  if (!base64Audio) {\n    return { json: { ...$input.first().json, processed_content: '[Áudio não pôde ser processado]', content_type: 'audio_failed' } };\n  }\n\n  // 2. Converter base64 para buffer\n  const audioBuffer = Buffer.from(base64Audio, 'base64');\n\n  // 3. Enviar para Whisper (OpenAI)\n  const FormData = (await import('form-data')).default;\n  const form = new FormData();\n  form.append('file', audioBuffer, { filename: 'audio.ogg', contentType: mimetype });\n  form.append('model', 'whisper-1');\n  form.append('language', 'pt');\n\n  const whisperResp = await fetch('https://api.openai.com/v1/audio/transcriptions', {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${$env.OPENAI_API_KEY}`,\n      ...form.getHeaders()\n    },\n    body: form\n  });\n  const transcription = await whisperResp.json();\n\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: `[Transcrição de áudio]: ${transcription.text || '[Não foi possível transcrever]'}`,\n      content_type: 'audio_transcribed'\n    }\n  };\n} catch (err) {\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: `[Erro ao processar áudio]: ${err.message}`,\n      content_type: 'audio_error'\n    }\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "id": "process-audio",
+      "name": "[6b] Transcrever Áudio (Whisper)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analisar imagem via GPT-4o Vision\nconst remoteJid = $input.first().json.remote_jid;\nconst instance = $input.first().json.instance;\nconst messageId = $input.first().json.message_id;\nconst caption = $input.first().json.message_content || '';\n\nconst evolutionUrl = $env.EVOLUTION_API_URL || '';\nconst evolutionKey = $env.EVOLUTION_API_KEY || '';\n\ntry {\n  // 1. Download da imagem via Evolution\n  const mediaResp = await fetch(`${evolutionUrl}/chat/getBase64FromMediaMessage/${instance}`, {\n    method: 'POST',\n    headers: {\n      'apikey': evolutionKey,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      message: { key: { id: messageId, remoteJid: remoteJid } },\n      convertToMp4: false\n    })\n  });\n  const mediaData = await mediaResp.json();\n  const base64Image = mediaData.base64 || '';\n  const mimetype = mediaData.mimetype || 'image/jpeg';\n\n  if (!base64Image) {\n    return { json: { ...$input.first().json, processed_content: '[Imagem não pôde ser processada]', content_type: 'image_failed' } };\n  }\n\n  // 2. Enviar para GPT-4o Vision\n  const visionResp = await fetch('https://api.openai.com/v1/chat/completions', {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${$env.OPENAI_API_KEY}`,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      model: 'gpt-4o',\n      messages: [\n        {\n          role: 'user',\n          content: [\n            {\n              type: 'text',\n              text: `Analise esta imagem no contexto de gestão financeira empresarial. Se for um comprovante, nota fiscal, boleto ou extrato, extraia todas as informações relevantes (valores, datas, fornecedor/cliente, CNPJ, descrição). Se for outra coisa, descreva brevemente.${caption ? ` O usuário enviou junto a legenda: \"${caption}\"` : ''}`\n            },\n            {\n              type: 'image_url',\n              image_url: { url: `data:${mimetype};base64,${base64Image}` }\n            }\n          ]\n        }\n      ],\n      max_tokens: 1000\n    })\n  });\n  const visionData = await visionResp.json();\n  const analysis = visionData.choices?.[0]?.message?.content || '[Falha na análise]';\n\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: `[Análise de imagem]: ${analysis}`,\n      content_type: 'image_analyzed'\n    }\n  };\n} catch (err) {\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: `[Erro ao processar imagem]: ${err.message}`,\n      content_type: 'image_error'\n    }\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        600
+      ],
+      "id": "process-image",
+      "name": "[6c] Analisar Imagem (GPT-4o)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar PDF via OCR (GPT-4o Vision com cada página)\nconst remoteJid = $input.first().json.remote_jid;\nconst instance = $input.first().json.instance;\nconst messageId = $input.first().json.message_id;\n\nconst evolutionUrl = $env.EVOLUTION_API_URL || '';\nconst evolutionKey = $env.EVOLUTION_API_KEY || '';\n\ntry {\n  const mediaResp = await fetch(`${evolutionUrl}/chat/getBase64FromMediaMessage/${instance}`, {\n    method: 'POST',\n    headers: {\n      'apikey': evolutionKey,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      message: { key: { id: messageId, remoteJid: remoteJid } },\n      convertToMp4: false\n    })\n  });\n  const mediaData = await mediaResp.json();\n  const base64Pdf = mediaData.base64 || '';\n\n  if (!base64Pdf) {\n    return { json: { ...$input.first().json, processed_content: '[PDF não pôde ser processado]', content_type: 'pdf_failed' } };\n  }\n\n  // Enviar o PDF como imagem para GPT-4o (primeira página)\n  const visionResp = await fetch('https://api.openai.com/v1/chat/completions', {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${$env.OPENAI_API_KEY}`,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      model: 'gpt-4o',\n      messages: [\n        {\n          role: 'user',\n          content: [\n            {\n              type: 'text',\n              text: 'Este é um documento PDF de contexto financeiro empresarial. Extraia todas as informações relevantes: valores, datas, fornecedor/cliente, CNPJ, descrição dos itens, e qualquer dado financeiro útil. Organize a informação de forma clara.'\n            },\n            {\n              type: 'image_url',\n              image_url: { url: `data:application/pdf;base64,${base64Pdf}` }\n            }\n          ]\n        }\n      ],\n      max_tokens: 2000\n    })\n  });\n  const visionData = await visionResp.json();\n  const extraction = visionData.choices?.[0]?.message?.content || '[Falha na extração]';\n\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: `[Extração de PDF]: ${extraction}`,\n      content_type: 'pdf_extracted'\n    }\n  };\n} catch (err) {\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: `[Erro ao processar PDF]: ${err.message}`,\n      content_type: 'pdf_error'\n    }\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        800
+      ],
+      "id": "process-pdf",
+      "name": "[6d] Processar PDF (OCR)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Documento genérico — apenas notifica que recebeu\nreturn {\n  json: {\n    ...$input.first().json,\n    processed_content: `[Documento recebido: ${$input.first().json.message_content}]. Para melhor processamento, envie como PDF ou imagem.`,\n    content_type: 'document_raw'\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        1000
+      ],
+      "id": "process-document",
+      "name": "[6e] Documento Genérico"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Buffer de mensagens — agrupa mensagens consecutivas do mesmo lead\n// antes de enviar ao agente (evita múltiplas chamadas à IA)\nconst redisUrl = $env.UPSTASH_REDIS_URL || '';\nconst redisToken = $env.UPSTASH_REDIS_TOKEN || '';\nconst remoteJid = $input.first().json.remote_jid;\nconst instance = $input.first().json.instance;\nconst bufferKey = `numa:buffer:${instance}:${remoteJid}`;\nconst content = $input.first().json.processed_content || $input.first().json.message_content;\nconst BUFFER_WAIT_SECONDS = 8;\n\ntry {\n  // Adicionar mensagem ao buffer (Redis LIST)\n  await fetch(`${redisUrl}/rpush/${bufferKey}/${encodeURIComponent(content)}`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n\n  // Definir TTL no buffer\n  await fetch(`${redisUrl}/expire/${bufferKey}/${BUFFER_WAIT_SECONDS + 10}`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n\n  // Definir lock com timestamp\n  const lockKey = `numa:buffer_lock:${instance}:${remoteJid}`;\n  const now = Date.now();\n  await fetch(`${redisUrl}/set/${lockKey}/${now}/EX/${BUFFER_WAIT_SECONDS + 5}`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n\n  return {\n    json: {\n      ...$input.first().json,\n      buffer_key: bufferKey,\n      lock_key: lockKey,\n      lock_timestamp: now,\n      buffer_wait_seconds: BUFFER_WAIT_SECONDS\n    }\n  };\n} catch (err) {\n  // Fallback: enviar direto sem buffer\n  return {\n    json: {\n      ...$input.first().json,\n      processed_content: content,\n      buffer_key: '',\n      buffered: false\n    }\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        400
+      ],
+      "id": "buffer-message",
+      "name": "[7] Buffer (Redis)"
+    },
+    {
+      "parameters": {
+        "amount": 8,
+        "unit": "seconds"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        760,
+        400
+      ],
+      "id": "wait-buffer",
+      "name": "[7b] Aguardar Buffer"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Comparar lock — só processa se for a mensagem mais recente\nconst redisUrl = $env.UPSTASH_REDIS_URL || '';\nconst redisToken = $env.UPSTASH_REDIS_TOKEN || '';\nconst lockKey = $input.first().json.lock_key;\nconst myTimestamp = $input.first().json.lock_timestamp;\n\ntry {\n  const response = await fetch(`${redisUrl}/get/${lockKey}`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n  const data = await response.json();\n  const currentLock = parseInt(data.result || '0');\n\n  if (currentLock !== myTimestamp) {\n    // Outro processamento mais recente vai cuidar\n    return { json: { should_process: false } };\n  }\n\n  // Eu sou o mais recente — consumir todas as mensagens do buffer\n  const bufferKey = $input.first().json.buffer_key;\n  const bufferResp = await fetch(`${redisUrl}/lrange/${bufferKey}/0/-1`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n  const bufferData = await bufferResp.json();\n  const messages = (bufferData.result || []).map(m => decodeURIComponent(m));\n\n  // Limpar buffer\n  await fetch(`${redisUrl}/del/${bufferKey}`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n  await fetch(`${redisUrl}/del/${lockKey}`, {\n    headers: { 'Authorization': `Bearer ${redisToken}` }\n  });\n\n  return {\n    json: {\n      ...$input.first().json,\n      should_process: true,\n      processed_content: messages.join('\\n'),\n      message_count: messages.length\n    }\n  };\n} catch (err) {\n  return {\n    json: {\n      ...$input.first().json,\n      should_process: true,\n      processed_content: $input.first().json.processed_content || $input.first().json.message_content,\n      message_count: 1\n    }\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        400
+      ],
+      "id": "compare-buffer",
+      "name": "[8] Comparar Buffer"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.should_process }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        400
+      ],
+      "id": "if-should-process",
+      "name": "[8b] Processar?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Upsert Lead no Supabase + buscar contexto da empresa\nconst supabaseUrl = $env.SUPABASE_URL || '';\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY || '';\nconst data = $input.first().json;\n\nconst headers = {\n  'apikey': supabaseKey,\n  'Authorization': `Bearer ${supabaseKey}`,\n  'Content-Type': 'application/json',\n  'Prefer': 'return=representation'\n};\n\ntry {\n  // 1. Buscar lead existente por remote_jid\n  let lead = null;\n  const searchField = data.lid_id ? 'lid_id' : 'remote_jid';\n  const searchValue = data.lid_id || data.remote_jid;\n  \n  const searchResp = await fetch(\n    `${supabaseUrl}/rest/v1/leads?${searchField}=eq.${encodeURIComponent(searchValue)}&select=*`,\n    { headers }\n  );\n  const leads = await searchResp.json();\n  lead = leads?.[0] || null;\n\n  if (lead) {\n    // 2a. Atualizar lead existente\n    const updateData = {\n      nome: data.push_name || lead.nome,\n      username_whatsapp: data.push_name || lead.username_whatsapp,\n      ultima_mensagem_at: new Date().toISOString(),\n      total_mensagens_recebidas: (lead.total_mensagens_recebidas || 0) + (data.message_count || 1),\n      updated_at: new Date().toISOString()\n    };\n    \n    // Atualizar telefone se era LID e agora tem telefone\n    if (data.telefone && !lead.telefone && !data.lid_id) {\n      updateData.telefone = data.telefone;\n      updateData.telefone_formatado = data.telefone_formatado;\n    }\n    \n    // Atualizar remote_jid se era LID\n    if (lead.lid_id && data.remote_jid && !data.remote_jid.includes('@lid')) {\n      updateData.remote_jid = data.remote_jid;\n      updateData.telefone = data.telefone;\n      updateData.telefone_formatado = data.telefone_formatado;\n    }\n\n    await fetch(\n      `${supabaseUrl}/rest/v1/leads?id=eq.${lead.id}`,\n      {\n        method: 'PATCH',\n        headers: { ...headers, 'Prefer': 'return=representation' },\n        body: JSON.stringify(updateData)\n      }\n    );\n    \n    lead = { ...lead, ...updateData };\n  } else {\n    // 2b. Criar novo lead\n    const newLead = {\n      remote_jid: data.remote_jid,\n      lid_id: data.lid_id || null,\n      telefone: data.telefone || null,\n      telefone_formatado: data.telefone_formatado || null,\n      nome: data.push_name || null,\n      username_whatsapp: data.push_name || null,\n      instancia_evolution: data.instance || 'default',\n      origem: data.origem || 'whatsapp_organico',\n      ctwa_clid: data.ctwa_clid || null,\n      utm_source: data.utm_source || null,\n      utm_medium: data.utm_medium || null,\n      utm_campaign: data.utm_campaign || null,\n      utm_content: data.utm_content || null,\n      status: 'novo',\n      funnel_stage: 'awareness',\n      primeira_mensagem_at: new Date().toISOString(),\n      ultima_mensagem_at: new Date().toISOString(),\n      total_mensagens_recebidas: 1\n    };\n\n    const createResp = await fetch(\n      `${supabaseUrl}/rest/v1/leads`,\n      {\n        method: 'POST',\n        headers: { ...headers, 'Prefer': 'return=representation' },\n        body: JSON.stringify(newLead)\n      }\n    );\n    const created = await createResp.json();\n    lead = created?.[0] || newLead;\n  }\n\n  // 3. Buscar contexto da empresa (se lead vinculado)\n  let companyContext = null;\n  if (lead.company_id) {\n    const compResp = await fetch(\n      `${supabaseUrl}/rest/v1/companies?id=eq.${lead.company_id}&select=id,name,trading_name,segment,currency,currency_symbol`,\n      { headers }\n    );\n    const companies = await compResp.json();\n    companyContext = companies?.[0] || null;\n  }\n\n  // 4. Buscar session_id para memória do agente\n  let sessionId = lead.session_id;\n  if (!sessionId) {\n    sessionId = `numa_${lead.id}_${Date.now()}`;\n    await fetch(\n      `${supabaseUrl}/rest/v1/leads?id=eq.${lead.id}`,\n      {\n        method: 'PATCH',\n        headers,\n        body: JSON.stringify({ session_id: sessionId })\n      }\n    );\n  }\n\n  return {\n    json: {\n      ...data,\n      lead: lead,\n      company: companyContext,\n      session_id: sessionId,\n      lead_id: lead.id,\n      company_id: lead.company_id\n    }\n  };\n} catch (err) {\n  return {\n    json: {\n      ...data,\n      lead: null,\n      company: null,\n      session_id: `fallback_${Date.now()}`,\n      error_lead: err.message\n    }\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        400
+      ],
+      "id": "lead-crud",
+      "name": "[9] Lead CRUD (Supabase)"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.processed_content }}",
+        "options": {
+          "systemMessage": "# IDENTIDADE\n\nVocê é o **NUMA**, consultor financeiro empresarial inteligente. Você ajuda empresários e gestores a administrar suas finanças empresariais de forma eficiente pelo WhatsApp.\n\n## PERSONALIDADE\n- Profissional, direto e estratégico\n- Usa linguagem clara e objetiva (sem ser excessivamente formal)\n- Chama o cliente pelo nome quando possível\n- Usa emojis com moderação (📊💰📈⚠️✅)\n- Não é verboso — respostas concisas mas completas\n\n## CONTEXTO DO LEAD\n- Nome: {{ $json.lead?.nome || 'Cliente' }}\n- Empresa: {{ $json.company?.name || $json.company?.trading_name || 'Não vinculada' }}\n- Segmento: {{ $json.company?.segment || 'Não informado' }}\n- Moeda: {{ $json.company?.currency_symbol || 'R$' }} ({{ $json.company?.currency || 'BRL' }})\n- Company ID: {{ $json.company_id || 'não vinculado' }}\n\n## CAPACIDADES\nVocê pode:\n1. **Registrar transações** (receitas e despesas) direto na empresa do cliente\n2. **Consultar saldo** das contas bancárias\n3. **Listar transações** recentes com filtros\n4. **Consultar contas a pagar** — próximos vencimentos\n5. **Consultar contas a receber** — previsão de recebimentos\n6. **Registrar contas a pagar/receber** — agendar pagamentos e recebimentos\n7. **Buscar categorias** — mostrar categorias disponíveis para classificação\n8. **Resumo financeiro** — visão geral mensal da empresa\n9. **Buscar clientes/fornecedores** — listar parceiros comerciais\n10. **Análise de imagem** — interpretar comprovantes, notas fiscais, boletos\n11. **Desativar agente** — transferir atendimento para um humano\n\n## REGRAS\n1. Se o cliente enviar um comprovante/nota, extraia os dados e pergunte se quer registrar a transação\n2. Para registrar transações, SEMPRE pergunte a categoria (ou sugira baseado no contexto)\n3. Se o cliente não tem empresa vinculada (company_id null), oriente-o a acessar o sistema web da Numa para completar o cadastro\n4. Nunca invente dados financeiros — sempre consulte via ferramentas\n5. Valores negativos = despesas, positivos = receitas\n6. Para datas, se o cliente disser \"hoje\", \"ontem\", \"semana passada\", converta para data real\n7. Se o cliente pedir para falar com um humano, ative a ferramenta de desativar agente\n\n## FORMATO DE RESPOSTA\n- Respostas curtas (máximo 3 parágrafos)\n- Use listas quando listar itens (máx 10)\n- Para valores financeiros, sempre formate com a moeda da empresa\n- NÃO use markdown (sem **, ##, ```) — o WhatsApp não renderiza\n- Use *texto* para negrito no WhatsApp\n\n## DATA ATUAL\n{{ new Date().toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) }}",
+          "maxIterations": 10
+        },
+        "agent": "openAiFunctionsAgent",
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1 Mini"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        1760,
+        400
+      ],
+      "id": "ai-agent",
+      "name": "[10] AI Agent NUMA"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tools do agente NUMA — Supabase HTTP\n// Cada ferramenta é uma function que o agente pode chamar\n\nconst supabaseUrl = $env.SUPABASE_URL || '';\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY || '';\nconst companyId = $input.first().json.company_id;\n\nconst headers = {\n  'apikey': supabaseKey,\n  'Authorization': `Bearer ${supabaseKey}`,\n  'Content-Type': 'application/json'\n};\n\nconst toolName = $input.first().json.tool_name;\nconst toolInput = $input.first().json.tool_input || {};\n\ntry {\n  let result = null;\n\n  switch (toolName) {\n    case 'registrar_transacao': {\n      const { descricao, valor, tipo, categoria, data_transacao, conta_bancaria } = toolInput;\n      const body = {\n        company_id: companyId,\n        description: descricao,\n        amount: Math.abs(valor),\n        type: tipo || (valor < 0 ? 'despesa' : 'receita'),\n        category_name: categoria || 'Geral',\n        date: data_transacao || new Date().toISOString().split('T')[0],\n        status: 'realizado'\n      };\n      const resp = await fetch(`${supabaseUrl}/rest/v1/transactions`, {\n        method: 'POST',\n        headers: { ...headers, 'Prefer': 'return=representation' },\n        body: JSON.stringify(body)\n      });\n      result = await resp.json();\n      break;\n    }\n\n    case 'buscar_saldo_contas': {\n      const resp = await fetch(\n        `${supabaseUrl}/rest/v1/bank_accounts?company_id=eq.${companyId}&is_active=eq.true&select=name,current_balance,bank_name,account_type`,\n        { headers }\n      );\n      result = await resp.json();\n      break;\n    }\n\n    case 'listar_transacoes': {\n      const { periodo, tipo, limite } = toolInput;\n      let url = `${supabaseUrl}/rest/v1/transactions?company_id=eq.${companyId}&select=description,amount,type,date,category_name,status&order=date.desc&limit=${limite || 10}`;\n      if (tipo) url += `&type=eq.${tipo}`;\n      if (periodo) {\n        const start = new Date();\n        if (periodo === 'semana') start.setDate(start.getDate() - 7);\n        else if (periodo === 'mes') start.setMonth(start.getMonth() - 1);\n        else if (periodo === 'trimestre') start.setMonth(start.getMonth() - 3);\n        url += `&date=gte.${start.toISOString().split('T')[0]}`;\n      }\n      const resp = await fetch(url, { headers });\n      result = await resp.json();\n      break;\n    }\n\n    case 'consultar_contas_pagar': {\n      const { dias } = toolInput;\n      const dataLimite = new Date();\n      dataLimite.setDate(dataLimite.getDate() + (dias || 30));\n      const resp = await fetch(\n        `${supabaseUrl}/rest/v1/payables?company_id=eq.${companyId}&status=eq.pendente&due_date=lte.${dataLimite.toISOString().split('T')[0]}&select=description,amount,due_date,supplier_name,status,category_name&order=due_date.asc&limit=15`,\n        { headers }\n      );\n      result = await resp.json();\n      break;\n    }\n\n    case 'consultar_contas_receber': {\n      const { dias } = toolInput;\n      const dataLimite = new Date();\n      dataLimite.setDate(dataLimite.getDate() + (dias || 30));\n      const resp = await fetch(\n        `${supabaseUrl}/rest/v1/receivables?company_id=eq.${companyId}&status=eq.pendente&due_date=lte.${dataLimite.toISOString().split('T')[0]}&select=description,amount,due_date,customer_name,status,category_name&order=due_date.asc&limit=15`,\n        { headers }\n      );\n      result = await resp.json();\n      break;\n    }\n\n    case 'buscar_categorias': {\n      const { tipo } = toolInput;\n      let url = `${supabaseUrl}/rest/v1/categories?company_id=eq.${companyId}&is_active=eq.true&select=name,type,color,icon`;\n      if (tipo) url += `&type=eq.${tipo}`;\n      const resp = await fetch(url, { headers });\n      result = await resp.json();\n      break;\n    }\n\n    case 'resumo_financeiro': {\n      const { mes, ano } = toolInput;\n      const targetMonth = mes || (new Date().getMonth() + 1);\n      const targetYear = ano || new Date().getFullYear();\n      const startDate = `${targetYear}-${String(targetMonth).padStart(2, '0')}-01`;\n      const endDate = new Date(targetYear, targetMonth, 0).toISOString().split('T')[0];\n      \n      const resp = await fetch(\n        `${supabaseUrl}/rest/v1/transactions?company_id=eq.${companyId}&date=gte.${startDate}&date=lte.${endDate}&select=amount,type,category_name`,\n        { headers }\n      );\n      const transactions = await resp.json();\n      \n      let totalReceitas = 0;\n      let totalDespesas = 0;\n      const porCategoria = {};\n      \n      for (const t of transactions) {\n        if (t.type === 'receita') totalReceitas += t.amount;\n        else totalDespesas += t.amount;\n        const cat = t.category_name || 'Sem categoria';\n        porCategoria[cat] = (porCategoria[cat] || 0) + t.amount;\n      }\n      \n      result = {\n        periodo: `${String(targetMonth).padStart(2, '0')}/${targetYear}`,\n        total_receitas: totalReceitas,\n        total_despesas: totalDespesas,\n        saldo: totalReceitas - totalDespesas,\n        total_transacoes: transactions.length,\n        por_categoria: porCategoria\n      };\n      break;\n    }\n\n    case 'buscar_clientes': {\n      const resp = await fetch(\n        `${supabaseUrl}/rest/v1/customers?company_id=eq.${companyId}&is_active=eq.true&select=name,document,email,phone&limit=20`,\n        { headers }\n      );\n      result = await resp.json();\n      break;\n    }\n\n    case 'buscar_fornecedores': {\n      const resp = await fetch(\n        `${supabaseUrl}/rest/v1/suppliers?company_id=eq.${companyId}&is_active=eq.true&select=name,document,email,phone&limit=20`,\n        { headers }\n      );\n      result = await resp.json();\n      break;\n    }\n\n    case 'desativar_agente': {\n      const redisUrl = $env.UPSTASH_REDIS_URL || '';\n      const redisToken = $env.UPSTASH_REDIS_TOKEN || '';\n      const remoteJid = $input.first().json.remote_jid;\n      const instance = $input.first().json.instance;\n      const botStatusKey = `numa:bot_status:${instance}:${remoteJid}`;\n      \n      // Desativar por 2 horas\n      await fetch(`${redisUrl}/set/${botStatusKey}/disabled/EX/7200`, {\n        headers: { 'Authorization': `Bearer ${redisToken}` }\n      });\n      \n      // Atualizar lead no Supabase\n      const leadId = $input.first().json.lead_id;\n      if (leadId) {\n        await fetch(`${supabaseUrl}/rest/v1/leads?id=eq.${leadId}`, {\n          method: 'PATCH',\n          headers,\n          body: JSON.stringify({\n            agente_ativo: false,\n            agente_desativado_at: new Date().toISOString(),\n            agente_desativado_motivo: toolInput.motivo || 'Solicitado pelo cliente'\n          })\n        });\n      }\n      \n      result = { status: 'agente_desativado', duracao: '2 horas', motivo: toolInput.motivo };\n      break;\n    }\n\n    default:\n      result = { error: `Ferramenta '${toolName}' não reconhecida` };\n  }\n\n  return { json: { result: JSON.stringify(result) } };\n} catch (err) {\n  return { json: { result: JSON.stringify({ error: err.message }) } };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        700
+      ],
+      "id": "agent-tools",
+      "name": "[10-Tools] Ferramentas Supabase",
+      "notesInFlow": true,
+      "notes": "Sub-node do AI Agent — Contém todas as tools"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Humanizar resposta — quebrar em mensagens menores para WhatsApp\nconst resposta = $input.first().json.output || $input.first().json.text || '';\nconst MAX_CHARS = 240;\n\nif (!resposta || resposta.trim() === '') {\n  return { json: { messages: ['Desculpe, não consegui processar sua solicitação. Pode repetir?'] } };\n}\n\n// Quebrar por parágrafos primeiro\nconst paragraphs = resposta.split('\\n\\n').filter(p => p.trim());\nconst messages = [];\n\nfor (const para of paragraphs) {\n  if (para.length <= MAX_CHARS) {\n    messages.push(para.trim());\n  } else {\n    // Quebrar por frases\n    const sentences = para.split(/(?<=[.!?])\\s+/);\n    let currentChunk = '';\n    \n    for (const sentence of sentences) {\n      if ((currentChunk + ' ' + sentence).length > MAX_CHARS && currentChunk) {\n        messages.push(currentChunk.trim());\n        currentChunk = sentence;\n      } else {\n        currentChunk = currentChunk ? currentChunk + ' ' + sentence : sentence;\n      }\n    }\n    if (currentChunk.trim()) {\n      messages.push(currentChunk.trim());\n    }\n  }\n}\n\n// Retornar array de mensagens\nreturn messages.map(msg => ({ json: { message: msg } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2040,
+        400
+      ],
+      "id": "humanize-response",
+      "name": "[11] Humanizar Resposta"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simular digitação antes de enviar (delays entre mensagens)\nconst message = $input.first().json.message;\nconst remoteJid = $('lead-crud').first().json.remote_jid || $('normalize-webhook').first().json.remote_jid;\nconst instance = $('lead-crud').first().json.instance || $('normalize-webhook').first().json.instance;\nconst evolutionUrl = $env.EVOLUTION_API_URL || '';\nconst evolutionKey = $env.EVOLUTION_API_KEY || '';\n\ntry {\n  // 1. Enviar presença \"composing\" (digitando)\n  await fetch(`${evolutionUrl}/chat/presence/${instance}`, {\n    method: 'POST',\n    headers: {\n      'apikey': evolutionKey,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      number: remoteJid,\n      presence: 'composing',\n      delay: Math.min(message.length * 30, 3000) // Delay proporcional ao tamanho\n    })\n  });\n\n  // 2. Aguardar (simular digitação humana)\n  const typingDelay = Math.min(Math.max(message.length * 25, 800), 3000);\n  await new Promise(resolve => setTimeout(resolve, typingDelay));\n\n  // 3. Enviar mensagem\n  const sendResp = await fetch(`${evolutionUrl}/message/sendText/${instance}`, {\n    method: 'POST',\n    headers: {\n      'apikey': evolutionKey,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      number: remoteJid,\n      text: message,\n      delay: 100\n    })\n  });\n  const sendResult = await sendResp.json();\n\n  // 4. Atualizar contador de mensagens enviadas no lead\n  const supabaseUrl = $env.SUPABASE_URL || '';\n  const supabaseKey = $env.SUPABASE_SERVICE_KEY || '';\n  const leadId = $('lead-crud').first().json.lead_id;\n  \n  if (leadId) {\n    await fetch(`${supabaseUrl}/rest/v1/rpc/increment_lead_sent_count`, {\n      method: 'POST',\n      headers: {\n        'apikey': supabaseKey,\n        'Authorization': `Bearer ${supabaseKey}`,\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({ p_lead_id: leadId })\n    }).catch(() => {}); // Non-critical\n  }\n\n  return { json: { sent: true, message: message, to: remoteJid } };\n} catch (err) {\n  return { json: { sent: false, error: err.message, message: message } };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2280,
+        400
+      ],
+      "id": "send-whatsapp",
+      "name": "[12] Enviar WhatsApp (Evolution)"
+    },
+    {
+      "parameters": {
+        "content": "## 🔗 Fluxo Principal\n\n**Webhook** → Normalizar → Filtrar → Status Agente → Tipo Msg → Buffer Redis → AI Agent → Humanizar → Enviar\n\n### Variáveis de Ambiente Necessárias:\n- `EVOLUTION_API_URL` — URL da Evolution API\n- `EVOLUTION_API_KEY` — API Key da Evolution\n- `SUPABASE_URL` — URL do projeto Supabase\n- `SUPABASE_SERVICE_KEY` — Service Role Key\n- `UPSTASH_REDIS_URL` — URL do Redis (Upstash)\n- `UPSTASH_REDIS_TOKEN` — Token do Redis\n- `OPENAI_API_KEY` — Para Whisper + GPT-4o + Agent",
+        "height": 400,
+        "width": 520,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1280,
+        100
+      ],
+      "id": "info-note",
+      "name": "📋 Info"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "## buscar_categoria\n\nConsulta as categorias financeiras da empresa.\n\n**RETORNA:** id, name, type (despesa/receita)\n\n**USE QUANDO:** Precisar obter o ID (UUID) de uma categoria para registrar uma conta, ou quando o cliente pedir a lista de categorias.",
+        "tableId": "categories",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "company_id",
+              "fieldValue": "={{ $json.company_id }}"
+            }
+          ]
+        }
+      },
+      "id": "1ed3dc7f-f272-4294-87eb-924a1167c492",
+      "name": "buscar_categoria",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        1100
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "[1] Webhook Evolution": {
+      "main": [
+        [
+          {
+            "node": "[2] Normalizar Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[2] Normalizar Webhook": {
+      "main": [
+        [
+          {
+            "node": "[3] Filtrar Mensagens Válidas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[3] Filtrar Mensagens Válidas": {
+      "main": [
+        [
+          {
+            "node": "[4] Verificar Status Agente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[4] Verificar Status Agente": {
+      "main": [
+        [
+          {
+            "node": "[5] Agente Ativo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[5] Agente Ativo?": {
+      "main": [
+        [
+          {
+            "node": "[6] Tipo Mensagem",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "[6] Tipo Mensagem": {
+      "main": [
+        [
+          {
+            "node": "[6a] Processar Texto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "[6b] Transcrever Áudio (Whisper)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "[6c] Analisar Imagem (GPT-4o)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "[6d] Processar PDF (OCR)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "[6e] Documento Genérico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[6a] Processar Texto": {
+      "main": [
+        [
+          {
+            "node": "[7] Buffer (Redis)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[6b] Transcrever Áudio (Whisper)": {
+      "main": [
+        [
+          {
+            "node": "[7] Buffer (Redis)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[6c] Analisar Imagem (GPT-4o)": {
+      "main": [
+        [
+          {
+            "node": "[7] Buffer (Redis)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[6d] Processar PDF (OCR)": {
+      "main": [
+        [
+          {
+            "node": "[7] Buffer (Redis)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[6e] Documento Genérico": {
+      "main": [
+        [
+          {
+            "node": "[7] Buffer (Redis)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[7] Buffer (Redis)": {
+      "main": [
+        [
+          {
+            "node": "[7b] Aguardar Buffer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[7b] Aguardar Buffer": {
+      "main": [
+        [
+          {
+            "node": "[8] Comparar Buffer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[8] Comparar Buffer": {
+      "main": [
+        [
+          {
+            "node": "[8b] Processar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[8b] Processar?": {
+      "main": [
+        [
+          {
+            "node": "[9] Lead CRUD (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "[9] Lead CRUD (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "[10] AI Agent NUMA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[10] AI Agent NUMA": {
+      "main": [
+        [
+          {
+            "node": "[11] Humanizar Resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "[11] Humanizar Resposta": {
+      "main": [
+        [
+          {
+            "node": "[12] Enviar WhatsApp (Evolution)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "buscar_categoria": {
+      "ai_tool": [
+        [
+          {
+            "node": "[10] AI Agent NUMA",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "whatsapp"
+    },
+    {
+      "name": "agente-ia"
+    },
+    {
+      "name": "numa"
+    }
+  ],
+  "triggerCount": 1
+}

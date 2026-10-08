@@ -1,0 +1,755 @@
+Found 19 functions in public schema.
+
+--- FUNCTION: can_create_first_company ---
+CREATE OR REPLACE FUNCTION public.can_create_first_company(_user_id uuid)
+ RETURNS boolean
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  SELECT NOT EXISTS (
+    SELECT 1
+    FROM public.user_companies
+    WHERE user_id = _user_id
+  )
+$function$
+
+--------------------------------
+
+--- FUNCTION: cleanup_old_hotmart_logs ---
+CREATE OR REPLACE FUNCTION public.cleanup_old_hotmart_logs()
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+  DELETE FROM public.hotmart_webhook_logs 
+  WHERE created_at < NOW() - INTERVAL '90 days';
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: convert_forecast_to_actual ---
+CREATE OR REPLACE FUNCTION public.convert_forecast_to_actual(p_forecast_id uuid, p_actual_amount numeric, p_keep_forecast boolean DEFAULT true, p_transaction_date date DEFAULT CURRENT_DATE, p_converted_by uuid DEFAULT NULL::uuid)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_forecast RECORD;
+  v_new_id UUID;
+  v_deviation NUMERIC;
+BEGIN
+  -- 1. Lock and fetch the forecast (prevents concurrent conversion)
+  SELECT * INTO v_forecast
+  FROM transactions
+  WHERE id = p_forecast_id
+    AND nature = 'previsao'
+    AND converted_at IS NULL
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Previsão não encontrada ou já convertida'
+      USING ERRCODE = 'P0002';
+  END IF;
+
+  -- 2. Validate amount
+  IF p_actual_amount <= 0 THEN
+    RAISE EXCEPTION 'O valor deve ser maior que zero'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- 3. Insert the realized transaction (atomic with the lock)
+  INSERT INTO transactions (
+    company_id, bank_account_id, chart_account_id,
+    category_id, customer_id, supplier_id,
+    type, amount, description, transaction_date,
+    payment_method, document_number,
+    notes, nature, linked_forecast_id
+  ) VALUES (
+    v_forecast.company_id, v_forecast.bank_account_id,
+    v_forecast.chart_account_id, v_forecast.category_id,
+    v_forecast.customer_id, v_forecast.supplier_id,
+    v_forecast.type, p_actual_amount, v_forecast.description,
+    p_transaction_date, v_forecast.payment_method,
+    v_forecast.document_number,
+    format('Convertido de previsão. Valor previsto: R$ %s', v_forecast.amount::TEXT),
+    'realizado', p_forecast_id
+  ) RETURNING id INTO v_new_id;
+
+  -- 4. Handle forecast: keep as history or delete (still atomic)
+  IF p_keep_forecast THEN
+    UPDATE transactions
+    SET converted_at = NOW(),
+        converted_by = p_converted_by
+    WHERE id = p_forecast_id;
+  ELSE
+    DELETE FROM transactions WHERE id = p_forecast_id;
+  END IF;
+
+  -- 5. Calculate deviation (safe against division by zero)
+  v_deviation := CASE
+    WHEN v_forecast.amount = 0 THEN
+      CASE WHEN p_actual_amount > 0 THEN 100.0 ELSE 0.0 END
+    ELSE ((p_actual_amount - v_forecast.amount) / v_forecast.amount) * 100
+  END;
+
+  RETURN json_build_object(
+    'new_transaction_id', v_new_id,
+    'deviation_percent', ROUND(v_deviation, 1),
+    'forecast_amount', v_forecast.amount,
+    'actual_amount', p_actual_amount
+  );
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: create_transaction_with_account ---
+CREATE OR REPLACE FUNCTION public.create_transaction_with_account(p_company_id uuid, p_bank_account_id uuid, p_chart_account_id uuid DEFAULT NULL::uuid, p_category_id uuid DEFAULT NULL::uuid, p_customer_id uuid DEFAULT NULL::uuid, p_supplier_id uuid DEFAULT NULL::uuid, p_type text DEFAULT 'saida'::text, p_amount numeric DEFAULT 0, p_description text DEFAULT ''::text, p_transaction_date date DEFAULT CURRENT_DATE, p_payment_method text DEFAULT NULL::text, p_document_number text DEFAULT NULL::text, p_notes text DEFAULT NULL::text, p_nature text DEFAULT 'realizado'::text, p_forecast_type text DEFAULT NULL::text, p_forecast_confidence numeric DEFAULT NULL::numeric, p_forecast_basis text DEFAULT NULL::text, p_forecast_notes text DEFAULT NULL::text, p_recurrence text DEFAULT NULL::text)
+ RETURNS uuid
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_transaction_id UUID;
+BEGIN
+  -- 1. Insert the transaction
+  INSERT INTO public.transactions (
+    company_id, bank_account_id, chart_account_id, category_id,
+    customer_id, supplier_id, type, amount, description,
+    transaction_date, payment_method, document_number, notes,
+    nature, forecast_type, forecast_confidence, forecast_basis,
+    forecast_notes, recurrence
+  ) VALUES (
+    p_company_id, p_bank_account_id, p_chart_account_id, p_category_id,
+    p_customer_id, p_supplier_id, p_type::transaction_type, p_amount, p_description,
+    p_transaction_date, p_payment_method, p_document_number, p_notes,
+    p_nature, p_forecast_type::forecast_type, p_forecast_confidence, p_forecast_basis,
+    p_forecast_notes, p_recurrence
+  )
+  RETURNING id INTO v_transaction_id;
+
+  -- 2. Create associated payable (saida + supplier + realizado)
+  IF p_nature = 'realizado' AND p_type = 'saida' AND p_supplier_id IS NOT NULL THEN
+    INSERT INTO public.payables (
+      company_id, supplier_id, chart_account_id, category_id,
+      description, document_number, due_date, issue_date,
+      total_amount, paid_amount, status, notes
+    ) VALUES (
+      p_company_id, p_supplier_id, p_chart_account_id, p_category_id,
+      p_description, p_document_number, p_transaction_date, p_transaction_date,
+      p_amount, 0, 'pendente', p_notes
+    );
+  END IF;
+
+  -- 3. Create associated receivable (entrada + customer + realizado)
+  IF p_nature = 'realizado' AND p_type = 'entrada' AND p_customer_id IS NOT NULL THEN
+    INSERT INTO public.receivables (
+      company_id, customer_id, chart_account_id, category_id,
+      description, document_number, due_date, issue_date,
+      total_amount, paid_amount, status, notes
+    ) VALUES (
+      p_company_id, p_customer_id, p_chart_account_id, p_category_id,
+      p_description, p_document_number, p_transaction_date, p_transaction_date,
+      p_amount, 0, 'pendente', p_notes
+    );
+  END IF;
+
+  RETURN v_transaction_id;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: get_financial_totals ---
+CREATE OR REPLACE FUNCTION public.get_financial_totals(p_company_id uuid, p_start_date date, p_end_date date)
+ RETURNS TABLE(receitas numeric, despesas numeric, receivables_total numeric, receivables_received numeric, payables_total numeric, payables_paid numeric, current_balance numeric)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    WITH 
+    -- 1. Transactions Totals (REALIZED)
+    tx_totals AS (
+        SELECT
+            COALESCE(SUM(CASE WHEN type = 'entrada' THEN amount ELSE 0 END), 0) as receitas,
+            COALESCE(SUM(CASE WHEN type = 'saida' THEN amount ELSE 0 END), 0) as despesas
+        FROM transactions
+        WHERE company_id = p_company_id
+        AND transaction_date BETWEEN p_start_date AND p_end_date
+    ),
+    -- 2. Receivables Totals (PROVISIONED & REALIZED)
+    rec_totals AS (
+        SELECT
+            COALESCE(SUM(total_amount), 0) as receivables_total,
+            COALESCE(SUM(paid_amount), 0) as receivables_received
+        FROM receivables
+        WHERE company_id = p_company_id
+        AND due_date BETWEEN p_start_date AND p_end_date
+    ),
+    -- 3. Payables Totals (PROVISIONED & REALIZED)
+    pay_totals AS (
+        SELECT
+            COALESCE(SUM(total_amount), 0) as payables_total,
+            COALESCE(SUM(paid_amount), 0) as payables_paid
+        FROM payables
+        WHERE company_id = p_company_id
+        AND due_date BETWEEN p_start_date AND p_end_date
+    ),
+    -- 4. Current Balance (ALL TIME)
+    bal_totals AS (
+        SELECT
+            COALESCE(SUM(current_balance), 0) as current_balance
+        FROM bank_accounts
+        WHERE company_id = p_company_id
+    )
+    SELECT
+        t.receitas,
+        t.despesas,
+        r.receivables_total,
+        r.receivables_received,
+        p.payables_total,
+        p.payables_paid,
+        b.current_balance
+    FROM tx_totals t, rec_totals r, pay_totals p, bal_totals b;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: get_user_context ---
+CREATE OR REPLACE FUNCTION public.get_user_context(p_user_id uuid)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_result JSONB;
+  v_profile JSONB;
+  v_roles app_role[];
+  v_companies JSONB;
+  v_default_company_id UUID;
+BEGIN
+  -- Get profile
+  SELECT jsonb_build_object(
+    'id', p.id,
+    'user_id', p.user_id,
+    'full_name', p.full_name,
+    'avatar_url', p.avatar_url,
+    'phone', p.phone,
+    'job_title', p.job_title,
+    'trial_started_at', p.trial_started_at,
+    'current_streak', p.current_streak,
+    'total_xp', p.total_xp,
+    'guardian_level', p.guardian_level,
+    'current_title', p.current_title
+  ) INTO v_profile
+  FROM profiles p
+  WHERE p.user_id = p_user_id;
+
+  -- Get roles as array
+  SELECT COALESCE(array_agg(role), ARRAY[]::app_role[])
+  INTO v_roles
+  FROM user_roles
+  WHERE user_id = p_user_id;
+
+  -- Get companies with full details
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'company_id', uc.company_id,
+        'is_default', uc.is_default,
+        'role', uc.role,
+        'company', jsonb_build_object(
+          'id', c.id,
+          'name', c.name,
+          'trading_name', c.trading_name,
+          'document', c.document,
+          'email', c.email,
+          'phone', c.phone,
+          'address', c.address,
+          'city', c.city,
+          'state', c.state,
+          'zip_code', c.zip_code,
+          'logo_url', c.logo_url,
+          'currency', c.currency,
+          'currency_symbol', c.currency_symbol,
+          'is_headquarters', c.is_headquarters,
+          'parent_company_id', c.parent_company_id,
+          'created_by', c.created_by
+        )
+      )
+    ),
+    '[]'::jsonb
+  ) INTO v_companies
+  FROM user_companies uc
+  JOIN companies c ON c.id = uc.company_id
+  WHERE uc.user_id = p_user_id;
+
+  -- Get default company id
+  SELECT company_id INTO v_default_company_id
+  FROM user_companies
+  WHERE user_id = p_user_id AND is_default = true
+  LIMIT 1;
+
+  -- Build final result
+  v_result := jsonb_build_object(
+    'profile', COALESCE(v_profile, '{}'::jsonb),
+    'roles', to_jsonb(v_roles),
+    'companies', v_companies,
+    'default_company_id', v_default_company_id
+  );
+
+  RETURN v_result;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: guard_reconciled_transactions ---
+CREATE OR REPLACE FUNCTION public.guard_reconciled_transactions()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  -- Allow soft-delete on reconciled transactions (is_deleted change)
+  IF NEW.is_deleted = true AND OLD.is_deleted = false THEN
+    RETURN NEW;
+  END IF;
+
+  -- Block all other edits on reconciled transactions
+  IF OLD.reconciled = true AND NEW.reconciled = OLD.reconciled THEN
+    -- Check if meaningful financial fields are being changed
+    IF OLD.amount != NEW.amount
+       OR OLD.type != NEW.type
+       OR OLD.bank_account_id != NEW.bank_account_id
+       OR OLD.transaction_date != NEW.transaction_date
+       OR OLD.description != NEW.description
+    THEN
+      RAISE EXCEPTION 'Transação conciliada não pode ser editada. Use estorno + novo lançamento.';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: handle_new_user ---
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_role app_role;
+  v_admin_exists boolean;
+BEGIN
+  -- Create profile with trial started
+  INSERT INTO public.profiles (user_id, full_name, trial_started_at)
+  VALUES (NEW.id, NEW.raw_user_meta_data ->> 'full_name', now());
+  
+  -- Use FOR UPDATE to lock the rows and prevent race condition
+  -- SKIP LOCKED ensures we don't wait if another transaction has the lock
+  SELECT EXISTS (
+    SELECT 1 FROM public.user_roles 
+    WHERE role = 'admin' 
+    FOR UPDATE SKIP LOCKED
+  ) INTO v_admin_exists;
+  
+  IF NOT v_admin_exists THEN
+    v_role := 'admin';
+  ELSE
+    v_role := 'viewer';
+  END IF;
+  
+  -- Assign role (avoid duplicates)
+  INSERT INTO public.user_roles (user_id, role)
+  VALUES (NEW.id, v_role)
+  ON CONFLICT (user_id, role) DO NOTHING;
+  
+  RETURN NEW;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: handle_payment_changes ---
+CREATE OR REPLACE FUNCTION public.handle_payment_changes()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+  -- Handle DELETE or UPDATE (Revert OLD values)
+  IF TG_OP = 'DELETE' OR TG_OP = 'UPDATE' THEN
+    IF OLD.receivable_id IS NOT NULL THEN
+      -- 1. Revert Bank Balance (Incoming money removed -> Subtract)
+      UPDATE public.bank_accounts 
+      SET current_balance = current_balance - OLD.amount 
+      WHERE id = OLD.bank_account_id;
+      
+      -- 2. Revert Receivable Paid Amount & Status
+      UPDATE public.receivables
+      SET paid_amount = paid_amount - OLD.amount,
+          status = CASE 
+            WHEN paid_amount - OLD.amount >= total_amount THEN 'pago'::receivable_status
+            WHEN paid_amount - OLD.amount > 0 THEN 'parcial'::receivable_status
+            ELSE 'pendente'::receivable_status
+          END
+      WHERE id = OLD.receivable_id;
+      
+    ELSIF OLD.payable_id IS NOT NULL THEN
+      -- 1. Revert Bank Balance (Outgoing money removed -> Add back)
+      UPDATE public.bank_accounts 
+      SET current_balance = current_balance + OLD.amount 
+      WHERE id = OLD.bank_account_id;
+      
+      -- 2. Revert Payable Paid Amount & Status
+      UPDATE public.payables
+      SET paid_amount = paid_amount - OLD.amount,
+          status = CASE 
+            WHEN paid_amount - OLD.amount >= total_amount THEN 'pago'::payable_status
+            WHEN paid_amount - OLD.amount > 0 THEN 'parcial'::payable_status
+            ELSE 'pendente'::payable_status
+          END
+      WHERE id = OLD.payable_id;
+    END IF;
+  END IF;
+
+  -- Handle INSERT or UPDATE (Apply NEW values)
+  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+    IF NEW.receivable_id IS NOT NULL THEN
+      -- 1. Apply Bank Balance (Incoming money -> Add)
+      UPDATE public.bank_accounts 
+      SET current_balance = current_balance + NEW.amount 
+      WHERE id = NEW.bank_account_id;
+      
+      -- 2. Apply Receivable Paid Amount & Status
+      UPDATE public.receivables
+      SET paid_amount = paid_amount + NEW.amount,
+          status = CASE 
+            WHEN paid_amount + NEW.amount >= total_amount THEN 'pago'::receivable_status
+            WHEN paid_amount + NEW.amount > 0 THEN 'parcial'::receivable_status
+            ELSE 'pendente'::receivable_status
+          END
+      WHERE id = NEW.receivable_id;
+      
+    ELSIF NEW.payable_id IS NOT NULL THEN
+      -- 1. Apply Bank Balance (Outgoing money -> Subtract)
+      UPDATE public.bank_accounts 
+      SET current_balance = current_balance - NEW.amount 
+      WHERE id = NEW.bank_account_id;
+      
+      -- 2. Apply Payable Paid Amount & Status
+      UPDATE public.payables
+      SET paid_amount = paid_amount + NEW.amount,
+          status = CASE 
+            WHEN paid_amount + NEW.amount >= total_amount THEN 'pago'::payable_status
+            WHEN paid_amount + NEW.amount > 0 THEN 'parcial'::payable_status
+            ELSE 'pendente'::payable_status
+          END
+      WHERE id = NEW.payable_id;
+    END IF;
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: has_role ---
+CREATE OR REPLACE FUNCTION public.has_role(_user_id uuid, _role app_role)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.user_roles
+    WHERE user_id = _user_id
+      AND role = _role
+  )
+$function$
+
+--------------------------------
+
+--- FUNCTION: is_company_owner ---
+CREATE OR REPLACE FUNCTION public.is_company_owner(_user_id uuid, _company_id uuid)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.companies
+    WHERE id = _company_id
+      AND created_by = _user_id
+  )
+$function$
+
+--------------------------------
+
+--- FUNCTION: log_audit ---
+CREATE OR REPLACE FUNCTION public.log_audit()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_user_id uuid;
+BEGIN
+  -- Get current user ID safely
+  v_user_id := auth.uid();
+  
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO public.audit_logs (
+      company_id, user_id, action, table_name, 
+      record_id, new_data
+    ) VALUES (
+      NEW.company_id, v_user_id, 'INSERT', TG_TABLE_NAME,
+      NEW.id, to_jsonb(NEW)
+    );
+    RETURN NEW;
+  ELSIF TG_OP = 'UPDATE' THEN
+    INSERT INTO public.audit_logs (
+      company_id, user_id, action, table_name,
+      record_id, old_data, new_data
+    ) VALUES (
+      NEW.company_id, v_user_id, 'UPDATE', TG_TABLE_NAME,
+      NEW.id, to_jsonb(OLD), to_jsonb(NEW)
+    );
+    RETURN NEW;
+  ELSIF TG_OP = 'DELETE' THEN
+    INSERT INTO public.audit_logs (
+      company_id, user_id, action, table_name,
+      record_id, old_data
+    ) VALUES (
+      OLD.company_id, v_user_id, 'DELETE', TG_TABLE_NAME,
+      OLD.id, to_jsonb(OLD)
+    );
+    RETURN OLD;
+  END IF;
+  RETURN NULL;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: reverse_transaction ---
+CREATE OR REPLACE FUNCTION public.reverse_transaction(p_transaction_id uuid, p_user_id uuid DEFAULT NULL::uuid, p_reason text DEFAULT 'Estorno'::text)
+ RETURNS uuid
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_original RECORD;
+  v_reversal_id UUID;
+  v_reverse_type TEXT;
+BEGIN
+  -- Fetch original transaction
+  SELECT * INTO v_original FROM public.transactions
+    WHERE id = p_transaction_id AND is_deleted = false;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Transação não encontrada ou já deletada: %', p_transaction_id;
+  END IF;
+
+  -- Determine reverse type
+  IF v_original.type = 'entrada' THEN
+    v_reverse_type := 'saida';
+  ELSE
+    v_reverse_type := 'entrada';
+  END IF;
+
+  -- Create reversal transaction
+  INSERT INTO public.transactions (
+    company_id, bank_account_id, chart_account_id, category_id,
+    customer_id, supplier_id, type, amount, description,
+    transaction_date, payment_method, document_number,
+    notes, nature, reversal_of
+  ) VALUES (
+    v_original.company_id, v_original.bank_account_id, v_original.chart_account_id,
+    v_original.category_id, v_original.customer_id, v_original.supplier_id,
+    v_reverse_type::transaction_type, v_original.amount,
+    p_reason || ': ' || v_original.description,
+    CURRENT_DATE, v_original.payment_method, v_original.document_number,
+    'Estorno de transação ' || p_transaction_id || '. Motivo: ' || p_reason,
+    'realizado', p_transaction_id
+  )
+  RETURNING id INTO v_reversal_id;
+
+  RETURN v_reversal_id;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: save_original_dates ---
+CREATE OR REPLACE FUNCTION public.save_original_dates()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+  -- Save original transaction_date on first change
+  IF OLD.original_transaction_date IS NULL 
+     AND NEW.transaction_date IS DISTINCT FROM OLD.transaction_date THEN
+    NEW.original_transaction_date = OLD.transaction_date;
+  END IF;
+  
+  -- Save original created_at if changed (rare but tracked)
+  IF OLD.original_created_at IS NULL 
+     AND NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    NEW.original_created_at = OLD.created_at;
+  END IF;
+  
+  RETURN NEW;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: set_company_created_by ---
+CREATE OR REPLACE FUNCTION public.set_company_created_by()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+  -- Sempre força created_by para o usuário autenticado
+  NEW.created_by := auth.uid();
+  RETURN NEW;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: update_bank_balance_on_transaction ---
+CREATE OR REPLACE FUNCTION public.update_bank_balance_on_transaction()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  -- Skip soft-deleted transactions
+  IF TG_OP = 'UPDATE' AND NEW.is_deleted = true AND OLD.is_deleted = false THEN
+    -- This is a soft delete — reverse the balance effect
+    IF OLD.type = 'entrada' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance - OLD.amount WHERE id = OLD.bank_account_id;
+    ELSIF OLD.type = 'saida' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance + OLD.amount WHERE id = OLD.bank_account_id;
+    END IF;
+    RETURN NEW;
+  END IF;
+  
+  -- Skip if already deleted
+  IF TG_OP = 'INSERT' AND NEW.is_deleted = true THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.type = 'entrada' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance + NEW.amount WHERE id = NEW.bank_account_id;
+    ELSIF NEW.type = 'saida' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance - NEW.amount WHERE id = NEW.bank_account_id;
+    END IF;
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- Reverse old effect
+    IF OLD.type = 'entrada' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance - OLD.amount WHERE id = OLD.bank_account_id;
+    ELSIF OLD.type = 'saida' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance + OLD.amount WHERE id = OLD.bank_account_id;
+    END IF;
+    -- Apply new effect (only if not deleted)
+    IF NEW.is_deleted = false THEN
+      IF NEW.type = 'entrada' THEN
+        UPDATE public.bank_accounts SET current_balance = current_balance + NEW.amount WHERE id = NEW.bank_account_id;
+      ELSIF NEW.type = 'saida' THEN
+        UPDATE public.bank_accounts SET current_balance = current_balance - NEW.amount WHERE id = NEW.bank_account_id;
+      END IF;
+    END IF;
+  ELSIF TG_OP = 'DELETE' THEN
+    IF OLD.type = 'entrada' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance - OLD.amount WHERE id = OLD.bank_account_id;
+    ELSIF OLD.type = 'saida' THEN
+      UPDATE public.bank_accounts SET current_balance = current_balance + OLD.amount WHERE id = OLD.bank_account_id;
+    END IF;
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: update_tenant_metrics ---
+CREATE OR REPLACE FUNCTION public.update_tenant_metrics()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+    INSERT INTO public.tenant_metrics (company_id, transactions_count, last_transaction_at, updated_at)
+    VALUES (NEW.company_id, 1, NEW.created_at, now())
+    ON CONFLICT (company_id) 
+    DO UPDATE SET 
+      transactions_count = tenant_metrics.transactions_count + 1,
+      last_transaction_at = GREATEST(tenant_metrics.last_transaction_at, NEW.created_at),
+      updated_at = now();
+    RETURN NEW;
+  END IF;
+  RETURN NULL;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: update_updated_at_column ---
+CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$function$
+
+--------------------------------
+
+--- FUNCTION: user_belongs_to_company ---
+CREATE OR REPLACE FUNCTION public.user_belongs_to_company(_user_id uuid, _company_id uuid)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.user_companies
+    WHERE user_id = _user_id
+      AND company_id = _company_id
+  )
+$function$
+
+--------------------------------

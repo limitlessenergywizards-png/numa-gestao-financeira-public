@@ -1,0 +1,53 @@
+project_id = "wqbbdortsqqglujgechi"
+
+# ── Protected functions (require valid JWT at gateway level) ──
+
+[functions.analyze-personality]
+verify_jwt = true
+
+[functions.analyze-dre]
+verify_jwt = true
+
+[functions.analyze-cashflow-projection]
+verify_jwt = true
+
+[functions.send-dre-report]
+verify_jwt = true
+
+[functions.send-invitation-email]
+verify_jwt = true
+
+[functions.admin-create-demo-user]
+verify_jwt = true
+
+[functions.admin-global-data]
+verify_jwt = true
+
+[functions.admin-impersonate]
+verify_jwt = true
+
+[functions.ai-chat]
+verify_jwt = true
+
+[functions.ai-ocr-proxy]
+verify_jwt = true
+
+[functions.create-portal-session]
+verify_jwt = true
+
+# ── Public functions (webhooks and guest checkout — no JWT) ──
+
+[functions.create-checkout-session]
+verify_jwt = false
+
+[functions.check-subscription]
+verify_jwt = false
+
+[functions.stripe-webhook]
+verify_jwt = false
+
+[functions.hotmart-webhook]
+verify_jwt = false
+
+[functions.whatsapp-agent]
+verify_jwt = false

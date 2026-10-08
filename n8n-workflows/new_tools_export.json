@@ -1,0 +1,284 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "toolDescription": "Busca fornecedores pelo nome. Use para verificar se o fornecedor já existe. ARGUMENTOS: name (string).",
+        "tableId": "suppliers",
+        "operation": "getAll",
+        "filterType": "manual",
+        "filters": {
+          "conditions": [
+            {
+              "fieldId": "company_id",
+              "operator": "eq",
+              "value": "={{ $('Lead CRUD (Supabase)').item.json.company_id }}"
+            },
+            {
+              "fieldId": "name",
+              "operator": "ilike",
+              "value": "={{ $json.name || $json.nome }}"
+            },
+            {
+              "fieldId": "is_active",
+              "operator": "eq",
+              "value": "true"
+            }
+          ]
+        },
+        "limit": 5
+      },
+      "id": "injected-supabase-buscar_fornecedor",
+      "name": "buscar_fornecedor",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Cria um novo fornecedor. ARGUMENTOS: name (obrigatório), document (opcional), email (opcional), phone (opcional).",
+        "tableId": "suppliers",
+        "operation": "create",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "company_id",
+              "fieldValue": "={{ $('Lead CRUD (Supabase)').item.json.company_id }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $json.name || $json.nome }}"
+            },
+            {
+              "fieldId": "document",
+              "fieldValue": "={{ $json.document }}"
+            },
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $json.email }}"
+            },
+            {
+              "fieldId": "phone",
+              "fieldValue": "={{ $json.phone }}"
+            },
+            {
+              "fieldId": "is_active",
+              "fieldValue": "true"
+            }
+          ]
+        }
+      },
+      "id": "injected-supabase-criar_fornecedor",
+      "name": "criar_fornecedor",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Registra uma conta a pagar (despesa futura). ARGUMENTOS: description, amount, due_date (YYYY-MM-DD), supplier_id (UUID).",
+        "tableId": "payables",
+        "operation": "create",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "company_id",
+              "fieldValue": "={{ $('Lead CRUD (Supabase)').item.json.company_id }}"
+            },
+            {
+              "fieldId": "description",
+              "fieldValue": "={{ $json.description }}"
+            },
+            {
+              "fieldId": "total_amount",
+              "fieldValue": "={{ $json.amount }}"
+            },
+            {
+              "fieldId": "due_date",
+              "fieldValue": "={{ $json.due_date }}"
+            },
+            {
+              "fieldId": "supplier_id",
+              "fieldValue": "={{ $json.supplier_id }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "pendente"
+            }
+          ]
+        }
+      },
+      "id": "injected-supabase-registrar_conta_pagar",
+      "name": "registrar_conta_pagar",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Busca clientes pelo nome. Use para verificar se o cliente já existe. ARGUMENTOS: name (string).",
+        "tableId": "customers",
+        "operation": "getAll",
+        "filterType": "manual",
+        "filters": {
+          "conditions": [
+            {
+              "fieldId": "company_id",
+              "operator": "eq",
+              "value": "={{ $('Lead CRUD (Supabase)').item.json.company_id }}"
+            },
+            {
+              "fieldId": "name",
+              "operator": "ilike",
+              "value": "={{ $json.name || $json.nome }}"
+            },
+            {
+              "fieldId": "is_active",
+              "operator": "eq",
+              "value": "true"
+            }
+          ]
+        },
+        "limit": 5
+      },
+      "id": "injected-supabase-buscar_cliente",
+      "name": "buscar_cliente",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Cria um novo cliente. ARGUMENTOS: name (obrigatório), document (opcional), email (opcional), phone (opcional).",
+        "tableId": "customers",
+        "operation": "create",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "company_id",
+              "fieldValue": "={{ $('Lead CRUD (Supabase)').item.json.company_id }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $json.name || $json.nome }}"
+            },
+            {
+              "fieldId": "document",
+              "fieldValue": "={{ $json.document }}"
+            },
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $json.email }}"
+            },
+            {
+              "fieldId": "phone",
+              "fieldValue": "={{ $json.phone }}"
+            },
+            {
+              "fieldId": "is_active",
+              "fieldValue": "true"
+            }
+          ]
+        }
+      },
+      "id": "injected-supabase-criar_cliente",
+      "name": "criar_cliente",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Registra uma conta a receber (receita futura). ARGUMENTOS: description, amount, due_date (YYYY-MM-DD), customer_id (UUID).",
+        "tableId": "receivables",
+        "operation": "create",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "company_id",
+              "fieldValue": "={{ $('Lead CRUD (Supabase)').item.json.company_id }}"
+            },
+            {
+              "fieldId": "description",
+              "fieldValue": "={{ $json.description }}"
+            },
+            {
+              "fieldId": "total_amount",
+              "fieldValue": "={{ $json.amount }}"
+            },
+            {
+              "fieldId": "due_date",
+              "fieldValue": "={{ $json.due_date }}"
+            },
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $json.customer_id }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "pendente"
+            }
+          ]
+        }
+      },
+      "id": "injected-supabase-registrar_conta_receber",
+      "name": "registrar_conta_receber",
+      "type": "n8n-nodes-base.supabaseTool",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "13uQNMnlpFpJ9iJ8",
+          "name": "Supabase | numagestaofinanceira@proton.me | Numa Gestão Financeira"
+        }
+      }
+    }
+  ]
+}
