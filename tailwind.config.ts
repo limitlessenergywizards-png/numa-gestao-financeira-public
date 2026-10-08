@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import typography from "@tailwindcss/typography";
 
 export default {
   darkMode: ["class"],
@@ -367,6 +368,38 @@ export default {
         syne: ["var(--font-syne)", "system-ui", "sans-serif"],
         manrope: ["var(--font-manrope)", "system-ui", "sans-serif"],
       },
+      // Typography para prose nas paginas SEO long-form (Reforma Tributaria etc).
+      // Cores via tokens HSL existentes (--foreground, --primary) por decisao A2.
+      typography: {
+        DEFAULT: {
+          css: {
+            "--tw-prose-body": "hsl(var(--foreground))",
+            "--tw-prose-headings": "hsl(var(--foreground))",
+            "--tw-prose-lead": "hsl(var(--foreground))",
+            "--tw-prose-links": "hsl(var(--primary))",
+            "--tw-prose-bold": "hsl(var(--foreground))",
+            "--tw-prose-counters": "hsl(var(--muted-foreground))",
+            "--tw-prose-bullets": "hsl(var(--muted-foreground))",
+            "--tw-prose-hr": "hsl(var(--border))",
+            "--tw-prose-quotes": "hsl(var(--foreground))",
+            "--tw-prose-quote-borders": "hsl(var(--primary))",
+            "--tw-prose-captions": "hsl(var(--muted-foreground))",
+            "--tw-prose-code": "hsl(var(--foreground))",
+            "--tw-prose-pre-code": "hsl(var(--foreground))",
+            "--tw-prose-pre-bg": "hsl(var(--muted))",
+            "--tw-prose-th-borders": "hsl(var(--border))",
+            "--tw-prose-td-borders": "hsl(var(--border))",
+            "--tw-prose-invert-body": "hsl(var(--foreground))",
+            "--tw-prose-invert-headings": "hsl(var(--foreground))",
+            "--tw-prose-invert-links": "hsl(var(--primary))",
+            "--tw-prose-invert-bold": "hsl(var(--foreground))",
+            "h1, h2, h3, h4": {
+              fontFamily: "var(--font-syne), system-ui, sans-serif",
+              fontWeight: "600",
+            },
+          },
+        },
+      },
       backdropBlur: {
         'xs': '4px',
         '2xl': '40px',
@@ -377,6 +410,7 @@ export default {
   },
   plugins: [
     require("tailwindcss-animate"),
+    typography,
     // Custom Glassmorphism utilities
     function ({ addUtilities }: { addUtilities: Function }) {
       addUtilities({

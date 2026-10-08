@@ -23,6 +23,13 @@ const nextConfig: NextConfig = {
 
   compress: true,
 
+  // PostHog reverse proxy: evita bloqueio por ad-blockers. Browser
+  // chama /ingest/* (same-origin) e Next.js encaminha para eu.i.posthog.com.
+  // skipTrailingSlashRedirect evita trailing-slash quebrar o proxy.
+  // No build mobile (output: 'export') rewrites nao se aplicam — analytics
+  // SEO so funciona em web/Vercel (T18 do context/01).
+  skipTrailingSlashRedirect: true,
+
   // Image optimization (SSR mode only — static export uses unoptimized above)
   ...(!isStaticExport && {
     images: {
@@ -88,6 +95,26 @@ const nextConfig: NextConfig = {
       };
     }
     return config;
+  },
+
+  // PostHog reverse proxy rewrites (SSR mode only — static export ignora rewrites).
+  async rewrites() {
+    if (isStaticExport) return [];
+
+    return [
+      {
+        source: '/ingest/static/:path*',
+        destination: 'https://eu-assets.i.posthog.com/static/:path*',
+      },
+      {
+        source: '/ingest/decide',
+        destination: 'https://eu.i.posthog.com/decide',
+      },
+      {
+        source: '/ingest/:path*',
+        destination: 'https://eu.i.posthog.com/:path*',
+      },
+    ];
   },
 
   // Legacy route redirects (SSR mode only — ignored in static export)
